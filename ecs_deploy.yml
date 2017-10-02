@@ -1,0 +1,146 @@
+# Bootstrap ECS and deploy the app
+
+- hosts: localhost
+  connection: local
+  gather_facts: False
+  tasks:
+    # Roles live in an eventually-consistent store. Create it first so it's propagated by the timeit's  needed.
+    - name: Create EC2 ECS IAM role
+      iam_role:
+        name: ec2_ecs_prod
+        state: present
+        assume_role_policy_document: "{{ lookup('file', './bootstrap/assume_policy.json') }}"
+        managed_policy: [ "arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role" ]
+      register: iam_role_result
+
+    - name: Create key pair
+      ec2_key:
+        name: hellokey
+        state: present
+        key_material: "{{ item  }}"
+      with_file: ./bootstrap/hello_id_rsa.pub
+
+    - name: Create VPC
+      ec2_vpc_net:
+        name: hello_vpc
+        cidr_block: 10.0.0.0/16
+        state: present
+      register: vpc_result
+
+    - name: Create security group
+      ec2_group:
+        name: ecs_prod_sg
+        description: "ECS prod nodes"
+        vpc_id: "{{ vpc_result.vpc.id }}"
+        rules:
+          - proto: tcp
+            from_port: 22
+            to_port: 22
+            cidr_ip: 0.0.0.0/0
+          - proto: tcp
+            from_port: 80
+            to_port: 80
+            cidr_ip: 0.0.0.0/0
+
+    - name: Create internet gateway
+      ec2_vpc_igw:
+        state: present
+        vpc_id: "{{ vpc_result.vpc.id }}"
+      register: igw_result
+
+    - name: Create subnet
+      ec2_vpc_subnet:
+        state: present
+        vpc_id: "{{ vpc_result.vpc.id }}"
+        az: "{{ lookup('env','AWS_REGION') }}a"
+        cidr: 10.0.0.0/28
+      register: subnet_result
+
+    - name: Create routing table
+      ec2_vpc_route_table:
+        state: present
+        subnets: [ "{{ subnet_result.subnet.id }}" ]
+        vpc_id: "{{ vpc_result.vpc.id }}"
+        routes:
+          - dest: 0.0.0.0/0
+            gateway_id: "{{ igw_result.gateway_id }}"
+
+    - name: Create ECS cluster
+      ecs_cluster:
+        name: prod
+        state: present
+
+    - name: Create ECR docker registry
+      ecs_ecr:
+        name: helloapp
+        state: present
+      register: ecs_ecr_result
+    
+    - name: Log in to ECR
+      shell: "$(aws ecr get-login --no-include-email --region {{ lookup('env','AWS_REGION') }})"
+
+    - name: Get repo SHA-1
+      command: "git rev-parse HEAD"
+      register: git_sha
+
+    - name: NPM install app dependencies
+      npm:
+        path: ./app
+
+    - name: Build docker image
+      docker_image:
+        name: "{{ ecs_ecr_result.repository.repositoryUri }}"
+        tag: "{{ git_sha.stdout }}"
+        state: present
+        push: true
+        path: ./app
+
+    - name: Find Amazon Linux ECS AMI
+      ec2_ami_find:
+        name: "amzn-ami-2017.03.f-amazon-ecs-optimized"
+        is_public: yes
+        no_result_action: fail
+        virtualization_type: hvm
+      register: ami_result
+
+    - name: Create EC2 instance
+      ec2:
+        assign_public_ip: true
+        id: helloapp_ecs
+        group: ecs_prod_sg
+        image: "{{ ami_result.results[0].ami_id }}"
+        instance_profile_name: "{{ iam_role_result.iam_role.role_name }}"
+        instance_type: t2.micro
+        key_name: hellokey
+        state: present
+        user_data: "{{ lookup('file', './bootstrap/userdata.sh') }}"
+        vpc_subnet_id: "{{ subnet_result.subnet.id }}"
+        wait: true
+      register: ec2_result
+
+    - name: Write host IP
+      shell: "echo {{ ec2_result.instances[0].public_ip }} > .hostip"
+
+    - name: Create task definition
+      ecs_taskdefinition:
+        state: present
+        family: helloapp
+        containers:
+          - name: helloapp
+            cpu: 10
+            essential: true
+            image: "{{ ecs_ecr_result.repository.repositoryUri }}:{{ git_sha.stdout }}"
+            memory: 250
+            portMappings:
+              - containerPort: 8081
+                hostPort: 80
+      register: ecs_td_result
+
+    - name: Create ECS service
+      ecs_service:
+        name: helloapp
+        cluster: prod
+        state: present
+        desired_count: 1
+        task_definition: "{{ ecs_td_result.taskdefinition.taskDefinitionArn }}"
+
