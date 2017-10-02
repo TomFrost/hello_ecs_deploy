@@ -11,3 +11,8 @@ Set `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_REGION` appropriately
 ### Run it
 `./deploy.sh`
 
+## OMG YOU COMMITTED AN RSA KEY
+I know, it's here for example purposes only. It's not used for anything outside of this sample deployment script.
+
+...as long as you don't use it in production. That'd be a bad idea. Don't do that. Replace it with `ssh-keygen`.
+
