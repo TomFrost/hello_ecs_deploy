@@ -4,7 +4,7 @@
   connection: local
   gather_facts: False
   tasks:
-    # Roles live in an eventually-consistent store. Create it first so it's propagated by the timeit's  needed.
+    # Roles live in an eventually-consistent store. Create it first so it's propagated by the time it's needed.
     - name: Create EC2 ECS IAM role
       iam_role:
         name: ec2_ecs_prod
